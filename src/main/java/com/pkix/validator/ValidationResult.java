@@ -281,6 +281,11 @@ public final class ValidationResult {
         private final int maxChainLength;
         private final List<String> allowedSignatureAlgorithms;
         private final List<String> requiredExtendedKeyUsage;
+        private final boolean useOcsp;
+        private final boolean useCrl;
+        private final boolean requireOcsp;
+        private final boolean requireCrl;
+        private final boolean softFailRevocation;
 
         private ValidationPolicy(Builder builder) {
             this.checkRevocation = builder.checkRevocation;
@@ -291,6 +296,11 @@ public final class ValidationResult {
                     new ArrayList<>(builder.allowedSignatureAlgorithms));
             this.requiredExtendedKeyUsage = Collections.unmodifiableList(
                     new ArrayList<>(builder.requiredExtendedKeyUsage));
+            this.useOcsp = builder.useOcsp;
+            this.useCrl = builder.useCrl;
+            this.requireOcsp = builder.requireOcsp;
+            this.requireCrl = builder.requireCrl;
+            this.softFailRevocation = builder.softFailRevocation;
         }
 
         public boolean isCheckRevocation() {
@@ -317,6 +327,26 @@ public final class ValidationResult {
             return requiredExtendedKeyUsage;
         }
 
+        public boolean isUseOcsp() {
+            return useOcsp;
+        }
+
+        public boolean isUseCrl() {
+            return useCrl;
+        }
+
+        public boolean isRequireOcsp() {
+            return requireOcsp;
+        }
+
+        public boolean isRequireCrl() {
+            return requireCrl;
+        }
+
+        public boolean isSoftFailRevocation() {
+            return softFailRevocation;
+        }
+
         public static Builder builder() {
             return new Builder();
         }
@@ -332,6 +362,11 @@ public final class ValidationResult {
             private int maxChainLength = 10;
             private List<String> allowedSignatureAlgorithms = new ArrayList<>();
             private List<String> requiredExtendedKeyUsage = new ArrayList<>();
+            private boolean useOcsp = true;
+            private boolean useCrl = true;
+            private boolean requireOcsp = false;
+            private boolean requireCrl = false;
+            private boolean softFailRevocation = true;
 
             public Builder checkRevocation(boolean checkRevocation) {
                 this.checkRevocation = checkRevocation;
@@ -360,6 +395,31 @@ public final class ValidationResult {
 
             public Builder requiredExtendedKeyUsage(List<String> keyUsage) {
                 this.requiredExtendedKeyUsage = new ArrayList<>(keyUsage);
+                return this;
+            }
+
+            public Builder useOcsp(boolean useOcsp) {
+                this.useOcsp = useOcsp;
+                return this;
+            }
+
+            public Builder useCrl(boolean useCrl) {
+                this.useCrl = useCrl;
+                return this;
+            }
+
+            public Builder requireOcsp(boolean requireOcsp) {
+                this.requireOcsp = requireOcsp;
+                return this;
+            }
+
+            public Builder requireCrl(boolean requireCrl) {
+                this.requireCrl = requireCrl;
+                return this;
+            }
+
+            public Builder softFailRevocation(boolean softFailRevocation) {
+                this.softFailRevocation = softFailRevocation;
                 return this;
             }
 

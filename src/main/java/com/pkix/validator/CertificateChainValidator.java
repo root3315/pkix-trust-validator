@@ -29,7 +29,8 @@ import java.util.stream.Collectors;
 /**
  * Core certificate chain validation engine implementing PKIX validation rules.
  * Performs comprehensive validation including signature verification, validity
- * period checks, key usage enforcement, and trust anchor verification.
+ * period checks, key usage enforcement, trust anchor verification, and
+ * revocation status checking via OCSP and CRL.
  */
 public class CertificateChainValidator {
 
@@ -46,6 +47,7 @@ public class CertificateChainValidator {
 
     private final TrustStoreManager trustStoreManager;
     private final ValidationResult.ValidationPolicy policy;
+    private final RevocationChecker revocationChecker;
 
     /**
      * Creates a new CertificateChainValidator.
@@ -57,6 +59,18 @@ public class CertificateChainValidator {
                                      ValidationResult.ValidationPolicy policy) {
         this.trustStoreManager = trustStoreManager;
         this.policy = policy;
+        this.revocationChecker = createRevocationChecker();
+    }
+
+    private RevocationChecker createRevocationChecker() {
+        RevocationChecker.RevocationPolicy revocationPolicy = RevocationChecker.RevocationPolicy.builder()
+                .useOcsp(policy.isUseOcsp())
+                .useCrl(policy.isUseCrl())
+                .requireOcsp(policy.isRequireOcsp())
+                .requireCrl(policy.isRequireCrl())
+                .softFail(policy.isSoftFailRevocation())
+                .build();
+        return new RevocationChecker(revocationPolicy, trustStoreManager.getTrustedCertificates());
     }
 
     /**
@@ -96,6 +110,24 @@ public class CertificateChainValidator {
 
         if (!errors.isEmpty()) {
             return ValidationResult.failure(errors, certInfos, getTrustAnchorSubject(), policy);
+        }
+
+        if (policy.isCheckRevocation()) {
+            RevocationChecker.RevocationResult revocationResult = performRevocationCheck(certificates);
+            if (revocationResult.isRevoked()) {
+                errors.add("Certificate is revoked: " + revocationResult.getMessage());
+                return ValidationResult.failure(errors, certInfos, getTrustAnchorSubject(), policy);
+            }
+            if (!revocationResult.isSuccess() && !policy.isSoftFailRevocation()) {
+                errors.add("Revocation check failed: " + revocationResult.getMessage());
+                for (String err : revocationResult.getErrors()) {
+                    errors.add("  " + err);
+                }
+                return ValidationResult.failure(errors, certInfos, getTrustAnchorSubject(), policy);
+            }
+            if (!revocationResult.isSuccess()) {
+                logger.fine("Revocation check did not succeed but soft-fail is enabled: " + revocationResult.getMessage());
+            }
         }
 
         try {
@@ -148,6 +180,36 @@ public class CertificateChainValidator {
         }
     }
 
+    private RevocationChecker.RevocationResult performRevocationCheck(List<X509Certificate> certificates) {
+        if (certificates.isEmpty()) {
+            return RevocationChecker.RevocationResult.skipped("No certificates to check");
+        }
+
+        X509Certificate endEntityCert = certificates.get(0);
+
+        X509Certificate issuerCert = null;
+        if (certificates.size() > 1) {
+            issuerCert = certificates.get(1);
+        } else {
+            issuerCert = findIssuerCertificate(endEntityCert);
+        }
+
+        if (issuerCert == null) {
+            return RevocationChecker.RevocationResult.failure("Cannot find issuer certificate for revocation check");
+        }
+
+        return revocationChecker.checkRevocation(endEntityCert, issuerCert);
+    }
+
+    private X509Certificate findIssuerCertificate(X509Certificate cert) {
+        for (X509Certificate trusted : trustStoreManager.getTrustedCertificates()) {
+            if (cert.getIssuerX500Principal().equals(trusted.getSubjectX500Principal())) {
+                return trusted;
+            }
+        }
+        return null;
+    }
+
     private CertPathValidatorResult performPKIXValidation(List<X509Certificate> certificates)
             throws CertPathValidatorException, NoSuchAlgorithmException, InvalidKeyException {
         CertificateFactory cf = CertificateFactory.getInstance("X.509");
@@ -159,7 +221,7 @@ public class CertificateChainValidator {
         }
 
         PKIXParameters params = new PKIXParameters(trustAnchors);
-        params.setRevocationEnabled(policy.isCheckRevocation());
+        params.setRevocationEnabled(false);
         params.setDate(new Date());
 
         CertPathValidator validator = CertPathValidator.getInstance("PKIX");

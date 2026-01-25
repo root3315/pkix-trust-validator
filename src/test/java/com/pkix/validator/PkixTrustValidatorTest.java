@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Unit tests for PKIX Trust Validator components.
- * Tests cover validation logic, policy enforcement, and certificate handling.
+ * Tests cover validation logic, policy enforcement, certificate handling,
+ * and revocation checking via OCSP and CRL.
  */
 @DisplayName("PKIX Trust Validator Tests")
 class PkixTrustValidatorTest {
@@ -120,6 +121,11 @@ class PkixTrustValidatorTest {
             assertTrue(policy.isRequireTimestampValidity());
             assertTrue(policy.isEnforceKeyUsage());
             assertEquals(10, policy.getMaxChainLength());
+            assertTrue(policy.isUseOcsp());
+            assertTrue(policy.isUseCrl());
+            assertFalse(policy.isRequireOcsp());
+            assertFalse(policy.isRequireCrl());
+            assertTrue(policy.isSoftFailRevocation());
         }
 
         @Test
@@ -130,12 +136,20 @@ class PkixTrustValidatorTest {
                     .requireTimestampValidity(false)
                     .enforceKeyUsage(false)
                     .maxChainLength(5)
+                    .useOcsp(true)
+                    .useCrl(false)
+                    .requireOcsp(true)
+                    .softFailRevocation(false)
                     .build();
 
             assertTrue(policy.isCheckRevocation());
             assertFalse(policy.isRequireTimestampValidity());
             assertFalse(policy.isEnforceKeyUsage());
             assertEquals(5, policy.getMaxChainLength());
+            assertTrue(policy.isUseOcsp());
+            assertFalse(policy.isUseCrl());
+            assertTrue(policy.isRequireOcsp());
+            assertFalse(policy.isSoftFailRevocation());
         }
 
         @Test
@@ -154,6 +168,134 @@ class PkixTrustValidatorTest {
             assertTrue(policy.isCheckRevocation());
             assertEquals(3, policy.getMaxChainLength());
             assertEquals(2, policy.getAllowedSignatureAlgorithms().size());
+        }
+
+        @Test
+        @DisplayName("Should create revocation-focused policy")
+        void testRevocationPolicy() {
+            ValidationResult.ValidationPolicy policy = ValidationResult.ValidationPolicy.builder()
+                    .checkRevocation(true)
+                    .useOcsp(true)
+                    .useCrl(true)
+                    .requireOcsp(false)
+                    .requireCrl(false)
+                    .softFailRevocation(true)
+                    .build();
+
+            assertTrue(policy.isCheckRevocation());
+            assertTrue(policy.isUseOcsp());
+            assertTrue(policy.isUseCrl());
+            assertFalse(policy.isRequireOcsp());
+            assertFalse(policy.isRequireCrl());
+            assertTrue(policy.isSoftFailRevocation());
+        }
+    }
+
+    @Nested
+    @DisplayName("Revocation Checker Tests")
+    class RevocationCheckerTests {
+
+        @Test
+        @DisplayName("Should create revocation checker with default policy")
+        void testRevocationCheckerDefaultPolicy() {
+            RevocationChecker.RevocationPolicy policy = RevocationChecker.RevocationPolicy.defaultPolicy();
+
+            assertTrue(policy.isUseOcsp());
+            assertTrue(policy.isUseCrl());
+            assertFalse(policy.isRequireOcsp());
+            assertFalse(policy.isRequireCrl());
+            assertTrue(policy.isSoftFail());
+        }
+
+        @Test
+        @DisplayName("Should create revocation checker with custom policy")
+        void testRevocationCheckerCustomPolicy() {
+            RevocationChecker.RevocationPolicy policy = RevocationChecker.RevocationPolicy.builder()
+                    .useOcsp(true)
+                    .useCrl(false)
+                    .requireOcsp(true)
+                    .softFail(false)
+                    .build();
+
+            assertTrue(policy.isUseOcsp());
+            assertFalse(policy.isUseCrl());
+            assertTrue(policy.isRequireOcsp());
+            assertFalse(policy.isSoftFail());
+        }
+
+        @Test
+        @DisplayName("Should return skipped result when revocation checking disabled")
+        void testRevocationSkipped() {
+            RevocationChecker.RevocationPolicy policy = RevocationChecker.RevocationPolicy.builder()
+                    .useOcsp(false)
+                    .useCrl(false)
+                    .build();
+
+            RevocationChecker checker = new RevocationChecker(policy, Collections.emptyList());
+            RevocationChecker.RevocationResult result = checker.checkRevocation(
+                    testCACert, testCACert);
+
+            assertTrue(result.isSkipped());
+        }
+
+        @Test
+        @DisplayName("Should return failure when no OCSP or CRL URLs available")
+        void testRevocationNoUrls() {
+            RevocationChecker.RevocationPolicy policy = RevocationChecker.RevocationPolicy.builder()
+                    .useOcsp(true)
+                    .useCrl(true)
+                    .build();
+
+            RevocationChecker checker = new RevocationChecker(policy, Collections.emptyList());
+            RevocationChecker.RevocationResult result = checker.checkRevocation(
+                    testCACert, testCACert);
+
+            assertTrue(result.isSkipped() || result.isFailure());
+        }
+
+        @Test
+        @DisplayName("Should create success revocation result")
+        void testRevocationResultSuccess() {
+            RevocationChecker.RevocationResult result =
+                    RevocationChecker.RevocationResult.success("Check passed");
+
+            assertEquals(RevocationChecker.RevocationResult.Status.SUCCESS, result.getStatus());
+            assertTrue(result.isSuccess());
+            assertFalse(result.isRevoked());
+            assertFalse(result.isFailure());
+            assertEquals("Check passed", result.getMessage());
+        }
+
+        @Test
+        @DisplayName("Should create revoked revocation result")
+        void testRevocationResultRevoked() {
+            RevocationChecker.RevocationResult result =
+                    RevocationChecker.RevocationResult.revoked("Certificate revoked");
+
+            assertEquals(RevocationChecker.RevocationResult.Status.REVOKED, result.getStatus());
+            assertTrue(result.isRevoked());
+            assertFalse(result.isSuccess());
+        }
+
+        @Test
+        @DisplayName("Should create failure revocation result")
+        void testRevocationResultFailure() {
+            RevocationChecker.RevocationResult result =
+                    RevocationChecker.RevocationResult.failure("Check failed");
+
+            assertEquals(RevocationChecker.RevocationResult.Status.FAILURE, result.getStatus());
+            assertTrue(result.isFailure());
+            assertEquals(1, result.getErrors().size());
+        }
+
+        @Test
+        @DisplayName("Should create skipped revocation result")
+        void testRevocationResultSkipped() {
+            RevocationChecker.RevocationResult result =
+                    RevocationChecker.RevocationResult.skipped("No URLs available");
+
+            assertEquals(RevocationChecker.RevocationResult.Status.SKIPPED, result.getStatus());
+            assertTrue(result.isSkipped());
         }
     }
 
@@ -219,6 +361,22 @@ class PkixTrustValidatorTest {
 
             assertNotNull(result);
         }
+
+        @Test
+        @DisplayName("Should create validator with revocation checking enabled")
+        void testValidatorWithRevocationChecking() throws Exception {
+            ValidationResult.ValidationPolicy policy = ValidationResult.ValidationPolicy.builder()
+                    .checkRevocation(true)
+                    .useOcsp(true)
+                    .useCrl(true)
+                    .softFailRevocation(true)
+                    .build();
+
+            TrustStoreManager manager = new TrustStoreManager();
+            CertificateChainValidator validator = new CertificateChainValidator(manager, policy);
+
+            assertNotNull(validator);
+        }
     }
 
     @Nested
@@ -273,6 +431,9 @@ class PkixTrustValidatorTest {
             ValidationResult.ValidationPolicy policy = ValidationResult.ValidationPolicy.builder()
                     .maxChainLength(5)
                     .enforceKeyUsage(false)
+                    .checkRevocation(true)
+                    .useOcsp(true)
+                    .useCrl(false)
                     .build();
 
             PkixTrustValidator validator = new PkixTrustValidator.Builder()
@@ -280,6 +441,25 @@ class PkixTrustValidatorTest {
                     .build();
 
             assertNotNull(validator);
+        }
+
+        @Test
+        @DisplayName("Should create validator with strict revocation policy")
+        void testValidatorWithStrictRevocation() throws Exception {
+            ValidationResult.ValidationPolicy policy = ValidationResult.ValidationPolicy.builder()
+                    .checkRevocation(true)
+                    .requireOcsp(true)
+                    .softFailRevocation(false)
+                    .build();
+
+            PkixTrustValidator validator = new PkixTrustValidator.Builder()
+                    .policy(policy)
+                    .build();
+
+            assertNotNull(validator);
+            assertTrue(policy.isCheckRevocation());
+            assertTrue(policy.isRequireOcsp());
+            assertFalse(policy.isSoftFailRevocation());
         }
     }
 

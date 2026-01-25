@@ -18,15 +18,17 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider;
 
 /**
  * Enterprise-grade X.509 certificate chain validation tool.
- * 
+ *
  * This main entry point provides command-line interface for validating
  * certificate chains against trust stores, with support for various
- * input formats and configurable validation policies.
- * 
+ * input formats and configurable validation policies including
+ * OCSP and CRL revocation checking.
+ *
  * Usage examples:
  *   java -jar pkix-trust-validator.jar validate /path/to/cert.pem
  *   java -jar pkix-trust-validator.jar validate --truststore /path/to/trust.jks /path/to/cert.pem
  *   java -jar pkix-trust-validator.jar validate --policy strict /path/to/chain.pem
+ *   java -jar pkix-trust-validator.jar validate --check-revocation --use-ocsp /path/to/cert.pem
  *   java -jar pkix-trust-validator.jar info /path/to/cert.pem
  */
 public class PkixTrustValidator {
@@ -54,7 +56,7 @@ public class PkixTrustValidator {
         this.trustStoreManager = new TrustStoreManager(
                 builder.trustStorePath,
                 builder.trustStoreType,
-                builder.trustStorePassword != null ? 
+                builder.trustStorePassword != null ?
                         builder.trustStorePassword.toCharArray() : null
         );
         this.policy = builder.policy;
@@ -64,11 +66,11 @@ public class PkixTrustValidator {
     private static void configureLogging() {
         Logger rootLogger = Logger.getLogger("");
         rootLogger.setLevel(Level.INFO);
-        
+
         ConsoleHandler handler = new ConsoleHandler();
         handler.setLevel(Level.INFO);
         handler.setFormatter(new SimpleFormatter());
-        
+
         rootLogger.addHandler(handler);
     }
 
@@ -187,6 +189,11 @@ public class PkixTrustValidator {
 
         System.out.println("POLICY:");
         System.out.println("  Check Revocation: " + result.getAppliedPolicy().isCheckRevocation());
+        System.out.println("  Use OCSP: " + result.getAppliedPolicy().isUseOcsp());
+        System.out.println("  Use CRL: " + result.getAppliedPolicy().isUseCrl());
+        System.out.println("  Require OCSP: " + result.getAppliedPolicy().isRequireOcsp());
+        System.out.println("  Require CRL: " + result.getAppliedPolicy().isRequireCrl());
+        System.out.println("  Soft Fail: " + result.getAppliedPolicy().isSoftFailRevocation());
         System.out.println("  Enforce Key Usage: " + result.getAppliedPolicy().isEnforceKeyUsage());
         System.out.println("  Max Chain Length: " + result.getAppliedPolicy().getMaxChainLength());
         System.out.println("=".repeat(60));
@@ -274,6 +281,13 @@ public class PkixTrustValidator {
         String policyType = "default";
         String certPath = null;
 
+        boolean checkRevocation = false;
+        boolean useOcsp = true;
+        boolean useCrl = true;
+        boolean requireOcsp = false;
+        boolean requireCrl = false;
+        boolean softFail = true;
+
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--truststore":
@@ -296,6 +310,32 @@ public class PkixTrustValidator {
                         policyType = args[++i];
                     }
                     break;
+                case "--check-revocation":
+                    checkRevocation = true;
+                    break;
+                case "--use-ocsp":
+                    useOcsp = true;
+                    break;
+                case "--no-ocsp":
+                    useOcsp = false;
+                    break;
+                case "--use-crl":
+                    useCrl = true;
+                    break;
+                case "--no-crl":
+                    useCrl = false;
+                    break;
+                case "--require-ocsp":
+                    requireOcsp = true;
+                    checkRevocation = true;
+                    break;
+                case "--require-crl":
+                    requireCrl = true;
+                    checkRevocation = true;
+                    break;
+                case "--no-soft-fail":
+                    softFail = false;
+                    break;
                 default:
                     if (!args[i].startsWith("-")) {
                         certPath = args[i];
@@ -317,7 +357,8 @@ public class PkixTrustValidator {
         }
 
         try {
-            ValidationResult.ValidationPolicy policy = buildPolicy(policyType);
+            ValidationResult.ValidationPolicy policy = buildPolicy(policyType, checkRevocation,
+                    useOcsp, useCrl, requireOcsp, requireCrl, softFail);
             PkixTrustValidator validator = new Builder()
                     .trustStore(trustStorePath, trustStoreType, trustStorePassword)
                     .policy(policy)
@@ -365,27 +406,34 @@ public class PkixTrustValidator {
         }
     }
 
-    private static ValidationResult.ValidationPolicy buildPolicy(String policyType) {
+    private static ValidationResult.ValidationPolicy buildPolicy(String policyType,
+            boolean checkRevocation, boolean useOcsp, boolean useCrl,
+            boolean requireOcsp, boolean requireCrl, boolean softFail) {
+        ValidationResult.ValidationPolicy.Builder builder = ValidationResult.ValidationPolicy.builder()
+                .checkRevocation(checkRevocation)
+                .useOcsp(useOcsp)
+                .useCrl(useCrl)
+                .requireOcsp(requireOcsp)
+                .requireCrl(requireCrl)
+                .softFailRevocation(softFail);
+
         switch (policyType.toLowerCase()) {
             case "strict":
-                return ValidationResult.ValidationPolicy.builder()
-                        .checkRevocation(false)
+                return builder
                         .requireTimestampValidity(true)
                         .enforceKeyUsage(true)
                         .maxChainLength(5)
                         .allowedSignatureAlgorithms(DEFAULT_ALLOWED_SIGNATURE_ALGORITHMS)
                         .build();
             case "permissive":
-                return ValidationResult.ValidationPolicy.builder()
-                        .checkRevocation(false)
+                return builder
                         .requireTimestampValidity(false)
                         .enforceKeyUsage(false)
                         .maxChainLength(20)
                         .build();
             case "default":
             default:
-                return ValidationResult.ValidationPolicy.builder()
-                        .checkRevocation(false)
+                return builder
                         .requireTimestampValidity(true)
                         .enforceKeyUsage(true)
                         .maxChainLength(10)
@@ -414,10 +462,22 @@ public class PkixTrustValidator {
         System.out.println("  --password <password>  Trust store password");
         System.out.println("  --policy <policy>      Validation policy (default, strict, permissive)");
         System.out.println();
+        System.out.println("Revocation Checking Options:");
+        System.out.println("  --check-revocation     Enable revocation checking (OCSP/CRL)");
+        System.out.println("  --use-ocsp             Use OCSP for revocation checking (default)");
+        System.out.println("  --no-ocsp              Disable OCSP checking");
+        System.out.println("  --use-crl              Use CRL for revocation checking (default)");
+        System.out.println("  --no-crl               Disable CRL checking");
+        System.out.println("  --require-ocsp         Require OCSP to succeed");
+        System.out.println("  --require-crl          Require CRL to succeed");
+        System.out.println("  --no-soft-fail         Fail validation if revocation check fails");
+        System.out.println();
         System.out.println("Examples:");
         System.out.println("  java -jar pkix-trust-validator.jar validate server.pem");
         System.out.println("  java -jar pkix-trust-validator.jar validate --policy strict chain.pem");
         System.out.println("  java -jar pkix-trust-validator.jar validate --truststore cacerts.jks cert.pem");
+        System.out.println("  java -jar pkix-trust-validator.jar validate --check-revocation --use-ocsp cert.pem");
+        System.out.println("  java -jar pkix-trust-validator.jar validate --check-revocation --no-soft-fail cert.pem");
         System.out.println("  java -jar pkix-trust-validator.jar info certificate.pem");
         System.out.println();
     }

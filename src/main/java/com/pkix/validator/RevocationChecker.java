@@ -33,6 +33,7 @@ import org.bouncycastle.operator.jcajce.JcaDigestCalculatorProviderBuilder;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.math.BigInteger;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
@@ -70,6 +71,10 @@ public class RevocationChecker {
     private static final int OCSP_TIMEOUT_MS = 10000;
     private static final int CRL_CACHE_VALIDITY_MS = 3600000;
     private static final String OCSP_NONCE_OID = "1.3.6.1.5.5.7.48.1.2";
+
+    private static final int MAX_RETRIES = 3;
+    private static final int INITIAL_RETRY_DELAY_MS = 1000;
+    private static final double RETRY_BACKOFF_MULTIPLIER = 2.0;
 
     private final RevocationPolicy revocationPolicy;
     private final List<X509Certificate> trustAnchors;
@@ -155,7 +160,7 @@ public class RevocationChecker {
 
         try {
             OCSPReq ocspRequest = createOcspRequest(certificate, issuerCert);
-            OCSPResp ocspResponse = sendOcspRequest(ocspUrl, ocspRequest);
+            OCSPResp ocspResponse = sendOcspRequestWithRetry(ocspUrl, ocspRequest);
 
             if (ocspResponse.getStatus() != OCSPResp.SUCCESSFUL) {
                 return RevocationResult.failure("OCSP responder returned status: " + ocspResponse.getStatus());
@@ -200,7 +205,7 @@ public class RevocationChecker {
         logger.fine("Checking CRL: " + crlUrl);
 
         try {
-            X509CRL crl = loadCrl(crlUrl);
+            X509CRL crl = loadCrlWithRetry(crlUrl);
             if (crl == null) {
                 return RevocationResult.failure("Failed to load CRL from: " + crlUrl);
             }
@@ -259,6 +264,58 @@ public class RevocationChecker {
         }
 
         return reqBuilder.build();
+    }
+
+    private OCSPResp sendOcspRequestWithRetry(String url, OCSPReq request) throws IOException {
+        return executeWithRetry(() -> sendOcspRequest(url, request), "OCSP request to " + url);
+    }
+
+    private X509CRL loadCrlWithRetry(String crlUrl) throws IOException, CRLException {
+        return executeWithRetry(() -> loadCrl(crlUrl), "CRL download from " + crlUrl);
+    }
+
+    private <T> T executeWithRetry(RetryableOperation<T> operation, String operationName) throws IOException {
+        int attempt = 0;
+        long delayMs = INITIAL_RETRY_DELAY_MS;
+        IOException lastException = null;
+
+        while (attempt < MAX_RETRIES) {
+            attempt++;
+            try {
+                if (attempt > 1) {
+                    logger.fine(String.format("Retry attempt %d/%d for %s", attempt, MAX_RETRIES, operationName));
+                    Thread.sleep(delayMs);
+                    delayMs = (long) (delayMs * RETRY_BACKOFF_MULTIPLIER);
+                }
+                return operation.execute();
+            } catch (SocketTimeoutException e) {
+                lastException = e;
+                logger.fine(String.format("Timeout on attempt %d/%d for %s", attempt, MAX_RETRIES, operationName));
+            } catch (IOException e) {
+                lastException = e;
+                if (isRetryableHttpError(e)) {
+                    logger.fine(String.format("Retryable IO error on attempt %d/%d for %s: %s",
+                            attempt, MAX_RETRIES, operationName, e.getMessage()));
+                } else {
+                    throw e;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Retry interrupted", e);
+            }
+        }
+
+        throw new IOException("Failed after " + MAX_RETRIES + " attempts: " + lastException.getMessage(), lastException);
+    }
+
+    private boolean isRetryableHttpError(IOException e) {
+        String message = e.getMessage();
+        if (message == null) {
+            return true;
+        }
+        return message.contains("500") || message.contains("502") || message.contains("503") ||
+               message.contains("504") || message.contains("Service Unavailable") ||
+               e instanceof SocketTimeoutException;
     }
 
     private OCSPResp sendOcspRequest(String url, OCSPReq request) throws IOException {
@@ -540,6 +597,11 @@ public class RevocationChecker {
             case CRLReason.aACompromise: return "AA compromise";
             default: return "unknown (" + reasonCode + ")";
         }
+    }
+
+    @FunctionalInterface
+    private interface RetryableOperation<T> {
+        T execute() throws IOException;
     }
 
     /**

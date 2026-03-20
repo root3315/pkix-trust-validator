@@ -16,6 +16,7 @@ PKIX Trust Validator is a comprehensive Java library for validating X.509 certif
 - **Chain Length Limits**: Configurable maximum certificate chain depth
 - **Detailed Reporting**: Comprehensive validation results with certificate metadata
 - **Bouncy Castle Integration**: Enhanced cryptographic algorithm support
+- **Resilient Revocation Checking**: OCSP and CRL checks with automatic retry and exponential backoff
 
 ## Requirements
 
@@ -206,6 +207,16 @@ for (ValidationResult.CertificateInfo info : certInfos) {
 5. **Trust Anchor Verification**: Confirm chain terminates at a trusted root
 6. **Key Usage Enforcement**: Validate key usage and extended key usage constraints
 7. **Algorithm Policy Check**: Verify signature algorithms meet policy requirements
+8. **Revocation Status Check**: Query OCSP responders and CRL distribution points with automatic retry
+
+### Revocation Checking
+
+OCSP and CRL checks include built-in retry logic for transient failures:
+
+- **Max Retries**: 3 attempts
+- **Initial Delay**: 1 second
+- **Backoff**: Exponential (2x multiplier)
+- **Retryable Errors**: HTTP 5xx responses, socket timeouts, connection failures
 
 ### Architecture
 
